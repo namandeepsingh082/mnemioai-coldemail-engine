@@ -1,0 +1,32 @@
+{
+  "name": "mnemioai-coldemail-engine",
+  "version": "1.0.0",
+  "description": "Cold-email sequencing engine with full lifecycle tracking, mock sending, AI personalization via OpenRouter, and a controllable clock.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "seed": "tsx src/cli.ts seed",
+    "run-workflow": "tsx src/cli.ts run",
+    "advance": "tsx src/cli.ts advance",
+    "report": "tsx src/cli.ts report",
+    "serve": "tsx src/server/index.ts",
+    "reset": "tsx src/cli.ts reset",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.3.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

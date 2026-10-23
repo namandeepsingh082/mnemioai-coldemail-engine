@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cold Email Engine — Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121820;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .controls { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+  button, input {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  input[type="number"] { width: 60px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13px; }
+  .bar-label { width: 140px; color: var(--muted); flex-shrink: 0; }
+  .bar-track { flex: 1; background: #1a2230; border-radius: 4px; height: 16px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); }
+  .bar-count { width: 50px; text-align: right; flex-shrink: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  .status-pill { padding: 2px 8px; border-radius: 10px; font-size: 11px; display: inline-block; }
+  select { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+  .pagination { display: flex; gap: 8px; margin-top: 10px; align-items: center; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Cold Email Engine</h1>
+  <div class="sub" id="clockLine">Loading…</div>
+
+  <div class="controls">
+    <button id="refreshBtn">Refresh</button>
+    <button id="runBtn">Run workflow now</button>
+    <span>Advance</span>
+    <input type="number" id="advanceDays" value="1" min="1" />
+    <span>day(s)</span>
+    <button id="advanceBtn">Advance time</button>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2>Contacts by status</h2>
+      <div id="statusBars"></div>
+    </div>
+    <div class="panel">
+      <h2>Reply classification</h2>
+      <div id="classBars"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Contacts</h2>
+    <div class="controls">
+      <select id="statusFilter">
+        <option value="">All statuses</option>
+      </select>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Email</th><th>Company</th><th>Segment</th><th>Status</th><th>Next action</th></tr>
+      </thead>
+      <tbody id="contactsBody"></tbody>
+    </table>
+    <div class="pagination">
+      <button id="prevPage">Prev</button>
+      <span id="pageInfo"></span>
+      <button id="nextPage">Next</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent activity</h2>
+    <table>
+      <thead><tr><th>When</th><th>Contact</th><th>Type</th><th>Step</th><th>Detail</th></tr></thead>
+      <tbody id="activityBody"></tbody>
+    </table>
+  </div>
+
+<script>
+  const STATUS_COLORS = {
+    new: "#64748b", first_sent: "#3b82f6", follow_up_1_sent: "#3b82f6",
+    follow_up_2_sent: "#3b82f6", follow_up_3_sent: "#3b82f6",
+    replied: "#22c55e", bounced: "#ef4444", unsubscribed: "#f59e0b", deactivated: "#9ca3af"
+  };
+
+  let offset = 0;
+  const limit = 25;
+
+  async function fetchJSON(url, opts) {
+    const res = await fetch(url, opts);
+    return res.json();
+  }
+
+  function pct(n) { return (n * 100).toFixed(1) + "%"; }
+
+  async function loadReport() {
+    const r = await fetchJSON("/api/report");
+    document.getElementById("clockLine").textContent =
+      `Simulated clock: ${r.generatedAt} · ${r.totalContacts.toLocaleString()} contacts`;
+
+    const cards = [
+      { label: "Sent today", value: r.sentToday },
+      { label: "Due today", value: r.dueToday },
+      { label: "Due tomorrow", value: r.dueTomorrow },
+      { label: "Total sent", value: r.totalSent },
+      { label: "Reply rate", value: pct(r.replyRate) },
+      { label: "Bounce rate", value: pct(r.bounceRate) },
+      { label: "Unsubscribed", value: r.totalUnsubscribed },
+      { label: "Deactivated", value: r.totalDeactivated },
+    ];
+    document.getElementById("cards").innerHTML = cards
+      .map((c) => `<div class="card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`)
+      .join("");
+
+    const maxStatus = Math.max(...Object.values(r.byStatus), 1);
+    document.getElementById("statusBars").innerHTML = Object.entries(r.byStatus)
+      .map(([status, n]) => {
+        const w = (n / maxStatus) * 100;
+        const color = STATUS_COLORS[status] || "#3b82f6";
+        return `<div class="bar-row">
+          <div class="bar-label">${status}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${color}"></div></div>
+          <div class="bar-count">${n}</div>
+        </div>`;
+      })
+      .join("");
+
+    const classEntries = Object.entries(r.replyClassificationBreakdown);
+    const maxClass = Math.max(...classEntries.map(([, n]) => n), 1);
+    document.getElementById("classBars").innerHTML = classEntries
+      .map(([cls, n]) => {
+        const w = (n / maxClass) * 100;
+        return `<div class="bar-row">
+          <div class="bar-label">${cls}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${w}%"></div></div>
+          <div class="bar-count">${n}</div>
+        </div>`;
+      })
+      .join("") || "<div style='color:var(--muted);font-size:13px'>No replies yet.</div>";
+
+    const statusFilter = document.getElementById("statusFilter");
+    if (statusFilter.options.length <= 1) {
+      for (const status of Object.keys(r.byStatus)) {
+        const opt = document.createElement("option");
+        opt.value = status;
+        opt.textContent = status;
+        statusFilter.appendChild(opt);
+      }
+    }
+  }
+
+  async function loadContacts() {
+    const status = document.getElementById("statusFilter").value;
+    const qs = new URLSearchParams({ limit, offset, ...(status ? { status } : {}) });
+    const data = await fetchJSON(`/api/contacts?${qs}`);
+    document.getElementById("contactsBody").innerHTML = data.rows
+      .map(
+        (c) => `<tr>
+          <td>${c.name}</td><td>${c.email}</td><td>${c.company}</td><td>${c.segment}</td>
+          <td>${c.status}</td>
+          <td>${c.next_action_ms ? new Date(c.next_action_ms).toLocaleDateString() + " → " + c.next_action_type : "—"}</td>
+        </tr>`
+      )
+      .join("");
+    const page = Math.floor(offset / limit) + 1;
+    const pages = Math.max(Math.ceil(data.total / limit), 1);
+    document.getElementById("pageInfo").textContent = `Page ${page} of ${pages} (${data.total} contacts)`;
+  }
+
+  async function loadActivity() {
+    const data = await fetchJSON("/api/activity?limit=40");
+    document.getElementById("activityBody").innerHTML = data.rows
+      .map(
+        (e) => `<tr>
+          <td>${new Date(e.occurred_at_ms).toLocaleString()}</td>
+          <td>${e.contact_name}</td>
+          <td>${e.type}</td>
+          <td>${e.step || "—"}</td>
+          <td>${e.classification || e.subject || ""}</td>
+        </tr>`
+      )
+      .join("");
+  }
+
+  async function refreshAll() {
+    await Promise.all([loadReport(), loadContacts(), loadActivity()]);
+  }
+
+  document.getElementById("refreshBtn").onclick = refreshAll;
+  document.getElementById("runBtn").onclick = async () => {
+    await fetchJSON("/api/run", { method: "POST" });
+    await refreshAll();
+  };
+  document.getElementById("advanceBtn").onclick = async () => {
+    const days = Number(document.getElementById("advanceDays").value || 1);
+    await fetchJSON("/api/advance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days }),
+    });
+    await refreshAll();
+  };
+  document.getElementById("statusFilter").onchange = () => { offset = 0; loadContacts(); };
+  document.getElementById("prevPage").onclick = () => { offset = Math.max(offset - limit, 0); loadContacts(); };
+  document.getElementById("nextPage").onclick = () => { offset = offset + limit; loadContacts(); };
+
+  refreshAll();
+</script>
+</body>
+</html>

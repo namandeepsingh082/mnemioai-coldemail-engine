@@ -1,0 +1,138 @@
+import { describe, it, beforeEach, after } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+
+process.env.DB_PATH = path.join(process.cwd(), "data", "test-lifecycle.db");
+
+const { getDb, closeDb } = await import("../src/db/index.js");
+const { seed } = await import("../src/seed.js");
+const { nowMs, advanceDays } = await import("../src/clock.js");
+const { runWorkflow } = await import("../src/workflow/scheduler.js");
+const { TERMINAL_STATUSES } = await import("../src/config.js");
+
+function resetDb() {
+  closeDb();
+  for (const ext of ["", "-wal", "-shm"]) {
+    const p = process.env.DB_PATH! + ext;
+    if (fs.existsSync(p)) fs.rmSync(p);
+  }
+}
+
+describe("lifecycle + idempotency", () => {
+  beforeEach(() => {
+    resetDb();
+    seed();
+  });
+
+  after(() => {
+    resetDb();
+  });
+
+  it("running the workflow twice at the same simulated time never double-sends", async () => {
+    const db = getDb();
+    const before = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
+
+    const first = await runWorkflow();
+    const afterFirst = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
+    assert.ok(afterFirst.c > before.c);
+    assert.ok(first.sent + first.bounced > 0);
+
+    const second = await runWorkflow();
+    const afterSecond = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
+
+    assert.equal(afterSecond.c, afterFirst.c);
+    assert.equal(second.sent, 0);
+    assert.equal(second.bounced, 0);
+  });
+
+  it("every contact has at most one 'sent' event per step, even after many runs", async () => {
+    const db = getDb();
+    for (let i = 0; i < 5; i++) {
+      await runWorkflow();
+    }
+    advanceDays(60);
+    for (let i = 0; i < 5; i++) {
+      await runWorkflow();
+    }
+
+    const dupes = db
+      .prepare(
+        `SELECT contact_id, step, COUNT(*) as c FROM events WHERE type = 'sent' GROUP BY contact_id, step HAVING c > 1`
+      )
+      .all();
+    assert.equal(dupes.length, 0);
+  });
+
+  it("a reply stops the sequence and the contact is never sent to again", async () => {
+    const db = getDb();
+    advanceDays(60);
+    await runWorkflow();
+
+    const repliedContacts = db.prepare("SELECT id FROM contacts WHERE status = 'replied'").all() as { id: number }[];
+    assert.ok(repliedContacts.length > 0);
+
+    const sentCountBefore = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
+    advanceDays(30);
+    await runWorkflow();
+    const sentCountAfter = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
+
+    // No events of any kind should be added for already-replied contacts.
+    const ids = repliedContacts.map((c) => c.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const postReplyEvents = db
+      .prepare(`SELECT COUNT(*) as c FROM events WHERE contact_id IN (${placeholders}) AND occurred_at_ms > ?`)
+      .get(...ids, nowMs() - 1) as { c: number };
+
+    assert.equal(postReplyEvents.c, 0);
+    assert.ok(sentCountAfter.c >= sentCountBefore.c);
+  });
+
+  it("bounced and unsubscribed contacts are suppressed permanently (status never changes again)", async () => {
+    const db = getDb();
+    advanceDays(90);
+    await runWorkflow();
+    advanceDays(90);
+    await runWorkflow();
+
+    const bounced = db.prepare("SELECT id, status FROM contacts WHERE status = 'bounced'").all() as {
+      id: number;
+      status: string;
+    }[];
+    const unsub = db.prepare("SELECT id, status FROM contacts WHERE status = 'unsubscribed'").all() as {
+      id: number;
+      status: string;
+    }[];
+    assert.ok(bounced.length > 0);
+    assert.ok(unsub.length > 0);
+
+    advanceDays(365);
+    await runWorkflow();
+
+    for (const row of [...bounced, ...unsub]) {
+      const current = db.prepare("SELECT status FROM contacts WHERE id = ?").get(row.id) as { status: string };
+      assert.equal(current.status, row.status);
+    }
+  });
+
+  it("deactivates contacts once all follow-ups are sent and the final wait passes with no reply", async () => {
+    advanceDays(120);
+    await runWorkflow();
+    advanceDays(60);
+    await runWorkflow();
+
+    const db = getDb();
+    const deactivated = db.prepare("SELECT COUNT(*) as c FROM contacts WHERE status = 'deactivated'").get() as {
+      c: number;
+    };
+    assert.ok(deactivated.c > 0);
+
+    const stillActive = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM contacts WHERE status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")}) AND next_action_ms < ?`
+      )
+      .get(...TERMINAL_STATUSES, nowMs() - 1000 * 60 * 60 * 24 * 30) as { c: number };
+    // Nothing should be sitting more than 30 days overdue after enough runs — the scheduler should have caught up.
+    assert.equal(stillActive.c, 0);
+  });
+});
