@@ -81,30 +81,32 @@ Model IDs are read from env (`OPENROUTER_WRITER_MODEL`, `OPENROUTER_CLASSIFIER_M
 
 ## Results of the 10,000-contact run
 
-Measured via `npm run benchmark` (seeds fresh, then repeatedly advances the simulated clock by 1 day and runs the workflow until every contact reaches a terminal status), no `OPENROUTER_API_KEY` set (fallback templates/classifier throughout), on an M-series MacBook:
+Measured via `npm run benchmark` (seeds fresh, then repeatedly advances the simulated clock by 1 day and runs the workflow until every contact reaches a terminal status), no `OPENROUTER_API_KEY` set (fallback templates/classifier throughout), on an M-series MacBook. These exact numbers are reproducible — re-running `npm run reset && npm run benchmark` (or just `npm run benchmark` again without resetting) gives byte-for-byte identical output every time, which is also covered by a test (`tests/lifecycle.test.ts`):
 
 ```
-Seed time:            451ms
+Seed time:            270ms
 Workflow passes:      23 (1 initial pass + 22 daily advances)
-Workflow time:        706ms total, 30.7ms/pass avg
-Total wall time:      1.16s  (seed + all 23 passes + report)
+Workflow time:        601ms total, 26.1ms/pass avg
+Total wall time:      871ms  (seed + all 23 passes + report)
 Final simulated date: 2026-11-11  (22 simulated days after the seed's "today")
 Still active (non-terminal): 0   — every contact reached a terminal status
 
 Final counts (10,000 total):
-  replied        3,557  (interested 1,528 / not_interested 1,586 / out_of_office 443)
-  bounced        1,352
+  replied        3,546  (interested 1,512 / not_interested 1,577 / out_of_office 457)
+  bounced        1,332
   unsubscribed   1,102
-  deactivated    3,989
+  deactivated    4,020
   (none left in new / first_sent / follow_up_*_sent — campaign fully played out)
 
-Total emails sent across the whole run: 31,791
-Bounce rate: 4.3%   ·   Reply rate: 11.2%
+Total emails sent across the whole run: 31,886
+Bounce rate: 4.2%   ·   Reply rate: 11.1%
 AI calls made: 24 (one per segment × step — see "Where AI is used" above); 0 classifier calls
   needed beyond the batched fallback path since no API key was set for this timed run.
 ```
 
-10,000 contacts, from a cold seed to every single one reaching a terminal lifecycle state, in about **1.2 seconds** of wall-clock time (the actual workflow processing — seed, scheduling, sending, bounce/reply/unsubscribe simulation, and reply classification — is ~700ms of that; the rest is seed generation and report formatting). This is with SQLite's WAL journaling and batched transactions (1,000 contacts per transaction), which is what keeps 10k+ contacts fast without any queue or worker pool.
+10,000 contacts, from a cold seed to every single one reaching a terminal lifecycle state, in under **1 second** of wall-clock time (the actual workflow processing — seed, scheduling, sending, bounce/reply/unsubscribe simulation, and reply classification — is ~600ms of that; the rest is seed generation and report formatting). This is with SQLite's WAL journaling and batched transactions (1,000 contacts per transaction), which is what keeps 10k+ contacts fast without any queue or worker pool.
+
+**A reproducibility bug I found and fixed while testing on a second machine run:** `seed()` deletes all rows but SQLite's `AUTOINCREMENT` counter doesn't reset on `DELETE` — so re-running `npm run seed` against an existing db file (without deleting the file itself) left contact ids climbing upward each time (10001, 20001, ...). Since the mock bounce/reply/unsubscribe simulation is keyed by contact id, that silently broke the "fixed seed → same results" guarantee: the seeded contact *data* was reproducible, but the live simulation's outcomes weren't, across repeated seed calls. Fixed by resetting `sqlite_sequence` for the relevant tables inside `seed()` — see the comment there and the regression test added for it.
 
 ## Bonus work included
 

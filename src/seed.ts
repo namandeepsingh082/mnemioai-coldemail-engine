@@ -165,6 +165,18 @@ export function seed(): void {
 
   db.exec("DELETE FROM events; DELETE FROM inbound_events; DELETE FROM contacts; DELETE FROM ai_templates;");
 
+  // Reset AUTOINCREMENT counters so contact (and event) ids always start fresh at 1.
+  // Without this, re-running `seed` against an existing db file leaves ids climbing
+  // upward each time, which silently breaks reproducibility: the mock send/reply
+  // simulation is keyed by contact id, so the same "fixed seed" data would still
+  // produce different simulated bounce/reply outcomes across repeated seed runs.
+  const hasSqliteSequence = db
+    .prepare("SELECT 1 as x FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'")
+    .get();
+  if (hasSqliteSequence) {
+    db.exec("DELETE FROM sqlite_sequence WHERE name IN ('contacts', 'events', 'inbound_events')");
+  }
+
   const insertContact = db.prepare(
     `INSERT INTO contacts (name, email, company, role, segment, timezone, status, created_at_ms, next_action_ms, next_action_type, reply_classification)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`

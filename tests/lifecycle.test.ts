@@ -29,6 +29,28 @@ describe("lifecycle + idempotency", () => {
     resetDb();
   });
 
+  it("re-seeding without deleting the db file still reproduces identical results (fixed seed)", async () => {
+    // seed() already ran once in beforeEach; re-seed over the same (non-deleted) db
+    // file a couple more times and confirm outcomes never drift. Contact ids must
+    // reset to the same values each time (AUTOINCREMENT counter reset in seed()),
+    // since the mock send/reply simulation is keyed by contact id.
+    seed();
+    const first = await runWorkflow();
+
+    seed();
+    const second = await runWorkflow();
+
+    assert.deepEqual(first, second);
+
+    const db = getDb();
+    const ids = db.prepare("SELECT MIN(id) as min, MAX(id) as max FROM contacts").get() as {
+      min: number;
+      max: number;
+    };
+    assert.equal(ids.min, 1);
+    assert.equal(ids.max, 10_000);
+  });
+
   it("running the workflow twice at the same simulated time never double-sends", async () => {
     const db = getDb();
     const before = db.prepare("SELECT COUNT(*) as c FROM events WHERE type = 'sent'").get() as { c: number };
