@@ -163,7 +163,9 @@ export function seed(): void {
   faker.seed(SEED);
   const db = getDb();
 
-  db.exec("DELETE FROM events; DELETE FROM inbound_events; DELETE FROM contacts; DELETE FROM ai_templates;");
+  db.exec(
+    "DELETE FROM events; DELETE FROM inbound_events; DELETE FROM contacts; DELETE FROM ai_templates; DELETE FROM suppression;"
+  );
 
   // Reset AUTOINCREMENT counters so contact (and event) ids always start fresh at 1.
   // Without this, re-running `seed` against an existing db file leaves ids climbing
@@ -184,6 +186,9 @@ export function seed(): void {
   const insertEvent = db.prepare(
     `INSERT INTO events (contact_id, type, step, classification, subject, body, occurred_at_ms)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertSuppression = db.prepare(
+    `INSERT OR IGNORE INTO suppression (email, reason, created_at_ms) VALUES (?, ?, ?)`
   );
 
   runInTransaction(db, () => {
@@ -216,6 +221,14 @@ export function seed(): void {
 
       for (const ev of history.events) {
         insertEvent.run(contactId, ev.type, ev.step ?? null, ev.classification ?? null, ev.subject ?? null, ev.body ?? null, ev.occurredAtMs);
+      }
+
+      // Seeded contacts already in a suppressed state need a suppression row too —
+      // otherwise only contacts bounced/unsubscribed by the *live* workflow would be
+      // suppressed, and the seeded historical ones would wrongly stay contactable.
+      if (status === "bounced" || status === "unsubscribed") {
+        const terminalEvent = history.events[history.events.length - 1];
+        insertSuppression.run(email, status, terminalEvent?.occurredAtMs ?? history.createdAtMs);
       }
     }
   });

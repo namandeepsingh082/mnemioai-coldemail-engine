@@ -2,6 +2,11 @@ import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { DatabaseSync } from "node:sqlite";
+
+const execFileAsync = promisify(execFile);
 
 process.env.DB_PATH = path.join(process.cwd(), "data", "test-lifecycle.db");
 
@@ -117,23 +122,50 @@ describe("lifecycle + idempotency", () => {
     advanceDays(90);
     await runWorkflow();
 
-    const bounced = db.prepare("SELECT id, status FROM contacts WHERE status = 'bounced'").all() as {
+    const bounced = db.prepare("SELECT id, email, status FROM contacts WHERE status = 'bounced'").all() as {
       id: number;
+      email: string;
       status: string;
     }[];
-    const unsub = db.prepare("SELECT id, status FROM contacts WHERE status = 'unsubscribed'").all() as {
+    const unsub = db.prepare("SELECT id, email, status FROM contacts WHERE status = 'unsubscribed'").all() as {
       id: number;
+      email: string;
       status: string;
     }[];
     assert.ok(bounced.length > 0);
     assert.ok(unsub.length > 0);
 
+    // Both outcomes must also land in the standalone suppression list, independent of status.
+    const suppressed = new Set(
+      (db.prepare("SELECT email FROM suppression").all() as { email: string }[]).map((r) => r.email)
+    );
+    for (const row of [...bounced, ...unsub]) {
+      assert.ok(suppressed.has(row.email), `expected ${row.email} to be in the suppression list`);
+    }
+
+    const checkpointMs = nowMs();
     advanceDays(365);
     await runWorkflow();
 
     for (const row of [...bounced, ...unsub]) {
       const current = db.prepare("SELECT status FROM contacts WHERE id = ?").get(row.id) as { status: string };
       assert.equal(current.status, row.status);
+    }
+
+    // Still suppressed after more runs — never removed, and never retried as a send attempt.
+    const suppressedAfter = new Set(
+      (db.prepare("SELECT email FROM suppression").all() as { email: string }[]).map((r) => r.email)
+    );
+    const ids = [...bounced, ...unsub].map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const sentToSuppressed = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM events WHERE type = 'sent' AND contact_id IN (${placeholders}) AND occurred_at_ms > ?`
+      )
+      .get(...ids, checkpointMs) as { c: number };
+    assert.equal(sentToSuppressed.c, 0);
+    for (const row of [...bounced, ...unsub]) {
+      assert.ok(suppressedAfter.has(row.email));
     }
   });
 
@@ -156,5 +188,42 @@ describe("lifecycle + idempotency", () => {
       .get(...TERMINAL_STATUSES, nowMs() - 1000 * 60 * 60 * 24 * 30) as { c: number };
     // Nothing should be sitting more than 30 days overdue after enough runs — the scheduler should have caught up.
     assert.equal(stillActive.c, 0);
+  });
+});
+
+describe("concurrent processes", () => {
+  it("two `run` processes launched at the same instant never produce a duplicate sent event", async () => {
+    const concurrentDbPath = path.join(process.cwd(), "data", "test-concurrency.db");
+    for (const ext of ["", "-wal", "-shm"]) {
+      const p = concurrentDbPath + ext;
+      if (fs.existsSync(p)) fs.rmSync(p);
+    }
+    const env = { ...process.env, DB_PATH: concurrentDbPath };
+    const run = (args: string[]) => execFileAsync("npx", ["tsx", "src/cli.ts", ...args], { env, cwd: process.cwd() });
+
+    await run(["seed"]);
+    await run(["advance", "--days=10"]); // make a large batch of contacts due at once, to widen the race window
+
+    // Launch both `run` invocations without awaiting the first — they race against the same db file.
+    const results = await Promise.allSettled([run(["run"]), run(["run"])]);
+    for (const r of results) {
+      assert.equal(r.status, "fulfilled", r.status === "rejected" ? String(r.reason) : undefined);
+    }
+
+    const db = new DatabaseSync(concurrentDbPath);
+    try {
+      const dupes = db
+        .prepare(
+          `SELECT contact_id, step, COUNT(*) as c FROM events WHERE type = 'sent' GROUP BY contact_id, step HAVING c > 1`
+        )
+        .all();
+      assert.equal(dupes.length, 0);
+    } finally {
+      db.close();
+      for (const ext of ["", "-wal", "-shm"]) {
+        const p = concurrentDbPath + ext;
+        if (fs.existsSync(p)) fs.rmSync(p);
+      }
+    }
   });
 });

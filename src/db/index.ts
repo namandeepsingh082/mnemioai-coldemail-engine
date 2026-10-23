@@ -15,6 +15,9 @@ export function getDb(): DatabaseSync {
   const db = new DatabaseSync(DB_PATH);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  // If a second process (e.g. two concurrent `npm run run-workflow` invocations) holds
+  // the write lock, wait up to 5s for it instead of failing immediately with SQLITE_BUSY.
+  db.exec("PRAGMA busy_timeout = 5000");
 
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   db.exec(schema);

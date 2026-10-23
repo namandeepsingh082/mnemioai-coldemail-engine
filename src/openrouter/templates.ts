@@ -1,6 +1,6 @@
 import { getDb } from "../db/index.js";
 import { nowMs } from "../clock.js";
-import { OPENROUTER_WRITER_MODEL, ROLE_SEGMENTS, STEPS, type Step } from "../config.js";
+import { OPENROUTER_API_KEY, OPENROUTER_WRITER_MODEL, ROLE_SEGMENTS, STEPS, type Step } from "../config.js";
 import { chatCompletion } from "./client.js";
 
 export interface Template {
@@ -109,10 +109,19 @@ Respond with strict JSON only: {"subject": "...", "body": "..."}`;
   }
 }
 
+/**
+ * A cached fallback template is only "stale" (worth retrying against the AI
+ * model) once an API key is actually configured — if there's still no key,
+ * retrying would just fail again for the same reason it fell back before.
+ */
+function isStaleFallback(cached: Template): boolean {
+  return cached.source === "fallback" && Boolean(OPENROUTER_API_KEY);
+}
+
 /** Gets a cached template or generates+caches one. One call per (segment, step), not per contact. */
 export async function getOrCreateTemplate(segment: string, step: Step): Promise<Template> {
   const cached = cacheGet(segment, step);
-  if (cached) return cached;
+  if (cached && !isStaleFallback(cached)) return cached;
 
   const aiTemplate = await generateWithAi(segment, step);
   const template = aiTemplate ?? fallbackTemplate(step);
@@ -127,7 +136,7 @@ export async function prewarmTemplates(): Promise<{ segments: number; steps: num
   for (const segment of ROLE_SEGMENTS) {
     for (const step of STEPS) {
       const existing = cacheGet(segment, step);
-      if (existing) continue;
+      if (existing && !isStaleFallback(existing)) continue;
       const t = await getOrCreateTemplate(segment, step);
       generated++;
       if (t.source === "ai") fromAi++;

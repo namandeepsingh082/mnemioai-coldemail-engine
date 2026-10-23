@@ -41,6 +41,25 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_contact ON events(contact_id);
 CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at_ms);
 
+-- Enforces "at most one sent email per (contact, step)" at the database
+-- level, independent of application logic — a second process racing the
+-- scheduler fails this constraint instead of silently inserting a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_sent_once ON events(contact_id, step)
+  WHERE type = 'sent';
+
+-- Suppression list: emails that must never be contacted again, independent
+-- of any single contact row's status. Written on unsubscribe and on bounce;
+-- checked before every send. This is what the brief's "added to a
+-- suppression list, never contacted again" literally means — status alone
+-- already stops the scheduler from re-selecting a contact, but this table
+-- makes the guarantee explicit, inspectable, and enforceable even if a
+-- contact's status were ever wrong or a new contact row reused the address.
+CREATE TABLE IF NOT EXISTS suppression (
+  email TEXT PRIMARY KEY,
+  reason TEXT NOT NULL, -- 'unsubscribed' | 'bounced'
+  created_at_ms INTEGER NOT NULL
+);
+
 -- Pending inbound events (a reply or unsubscribe that will "arrive" at a
 -- future simulated time, generated at send-time so outcomes are decided once
 -- and re-running the workflow can never duplicate or re-roll them).
